@@ -4,10 +4,23 @@ NTSTATUS CreatePlaceHolder(PCWSTR lpFileName, ULONG SizeOfImage)
 {
 	struct SEF : IMAGE_DOS_HEADER, IMAGE_NT_HEADERS, IMAGE_SECTION_HEADER
 	{
-	};
+	} y {};
 
-	SizeOfImage = (SizeOfImage + MAXUSHORT) & ~MAXUSHORT;
-	SEF y {};
+	//++ optional
+	union {
+		FILETIME ft;
+		LARGE_INTEGER time;
+	};
+	GetSystemTimeAsFileTime(&ft);
+	RtlTimeToSecondsSince1970(&time, &y.FileHeader.TimeDateStamp);
+	//-- optional
+
+	SYSTEM_INFO si;
+	GetSystemInfo(&si);
+	SizeOfImage = (SizeOfImage + si.dwAllocationGranularity - 1) & ~(si.dwAllocationGranularity - 1);
+
+	SIZE_T Alignment = si.dwPageSize - 1;
+
 	y.e_magic = IMAGE_DOS_SIGNATURE;
 	y.e_lfanew = sizeof(IMAGE_DOS_HEADER);
 	y.Signature = IMAGE_NT_SIGNATURE;
@@ -16,18 +29,18 @@ NTSTATUS CreatePlaceHolder(PCWSTR lpFileName, ULONG SizeOfImage)
 	y.FileHeader.NumberOfSections = 1;
 	y.FileHeader.Characteristics = IMAGE_FILE_DLL|IMAGE_FILE_EXECUTABLE_IMAGE|IMAGE_FILE_LARGE_ADDRESS_AWARE;
 	y.OptionalHeader.Magic = IMAGE_NT_OPTIONAL_HDR64_MAGIC;
-	y.OptionalHeader.ImageBase = 0x100000000;
-	y.OptionalHeader.SectionAlignment = 0x1000;
-	y.OptionalHeader.FileAlignment = 0x200;
-	y.OptionalHeader.MajorOperatingSystemVersion = 6;
-	y.OptionalHeader.MajorSubsystemVersion = 6;
-	y.OptionalHeader.SizeOfHeaders = (sizeof(SEF)+0x1ff) & ~0x1ff;
+	y.OptionalHeader.ImageBase = 1 + (ULONG_PTR)MAXULONG;
+	y.OptionalHeader.SectionAlignment = si.dwPageSize;
+	y.OptionalHeader.FileAlignment = si.dwPageSize;
+	y.OptionalHeader.MajorOperatingSystemVersion = _WIN32_WINNT_VISTA >> 8;
+	y.OptionalHeader.MajorSubsystemVersion = _WIN32_WINNT_VISTA >> 8;
+	y.OptionalHeader.SizeOfHeaders = (ULONG)((sizeof(y) + Alignment) & ~Alignment);
 	y.OptionalHeader.SizeOfImage = SizeOfImage;
 	y.OptionalHeader.Subsystem = IMAGE_SUBSYSTEM_WINDOWS_GUI;
 	y.OptionalHeader.DllCharacteristics = IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE|IMAGE_DLLCHARACTERISTICS_HIGH_ENTROPY_VA|IMAGE_DLLCHARACTERISTICS_NX_COMPAT;
 	y.OptionalHeader.NumberOfRvaAndSizes = IMAGE_NUMBEROF_DIRECTORY_ENTRIES;
-	y.VirtualAddress = 0x1000;
-	y.Misc.VirtualSize = SizeOfImage - 0x1000;
+	y.VirtualAddress = si.dwPageSize;
+	y.Misc.VirtualSize = SizeOfImage - si.dwPageSize;
 	y.Characteristics = IMAGE_SCN_CNT_CODE|IMAGE_SCN_MEM_EXECUTE|IMAGE_SCN_MEM_READ|IMAGE_SCN_MEM_WRITE;
 
 	NTSTATUS status;
@@ -37,11 +50,11 @@ NTSTATUS CreatePlaceHolder(PCWSTR lpFileName, ULONG SizeOfImage)
 		HANDLE hFile;
 		IO_STATUS_BLOCK iosb;
 		OBJECT_ATTRIBUTES oa = { sizeof(oa), 0, &ObjectName, OBJ_CASE_INSENSITIVE };
-
+		
 		status = NtCreateFile(&hFile, FILE_APPEND_DATA|SYNCHRONIZE, &oa, &iosb, 0, 
 			FILE_ATTRIBUTE_TEMPORARY|FILE_ATTRIBUTE_HIDDEN|FILE_ATTRIBUTE_SYSTEM, 0,
 			FILE_OVERWRITE_IF, FILE_SYNCHRONOUS_IO_NONALERT|FILE_NON_DIRECTORY_FILE, 0, 0);
-
+		
 		RtlFreeUnicodeString(&ObjectName);
 
 		if (0 <= status)
@@ -50,7 +63,7 @@ NTSTATUS CreatePlaceHolder(PCWSTR lpFileName, ULONG SizeOfImage)
 			NtClose(hFile);
 		}
 	}
-
+	
 	return status;
 }
 
@@ -198,7 +211,7 @@ LONG NTAPI MyVexHandler(::PEXCEPTION_POINTERS ExceptionInfo)
 {
 	::PEXCEPTION_RECORD ExceptionRecord = ExceptionInfo->ExceptionRecord;
 	::PCONTEXT ContextRecord = ExceptionInfo->ContextRecord;
-
+	
 	if (ExceptionRecord->ExceptionCode == STATUS_SINGLE_STEP && ExceptionRecord->ExceptionAddress == ZwMapViewOfSection)
 	{
 		if (IMAGE_Ctx* ctx = IMAGE_Ctx::get())
@@ -282,7 +295,7 @@ NTSTATUS LoadLibraryFromMem(_Out_ HMODULE* phmod, _In_ PVOID pvImage)
 
 	FILETIME nonce;
 	GetSystemTimeAsFileTime(&nonce);
-
+	
 	WCHAR buf[32];
 	if (0 < swprintf_s(buf, _countof(buf), L"%%tmp%%\\%08X%08X.tmp", 
 		RtlRandomEx(&nonce.dwHighDateTime), RtlRandomEx(&nonce.dwLowDateTime)))
@@ -309,6 +322,3 @@ NTSTATUS LoadLibraryFromMem(_Out_ HMODULE* phmod, _In_ PVOID pvImage)
 
 	return STATUS_INTERNAL_ERROR;
 }
-
-HMODULE hmod;
-LoadLibraryFromMem(&hmod, PAGE_ALIGN(LoadLibraryExW(L"iumcrypt", 0, LOAD_LIBRARY_AS_DATAFILE)));
