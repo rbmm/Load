@@ -103,7 +103,7 @@ struct IMAGE_Ctx : public TEB_ACTIVE_FRAME
 			} while (frame = frame->Previous);
 		}
 
-		return FALSE;
+		return 0;
 	}
 };
 
