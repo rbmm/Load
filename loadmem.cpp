@@ -1,19 +1,12 @@
 #include "stdafx.h"
 
+_NT_BEGIN
+
 NTSTATUS CreatePlaceHolder(PCWSTR lpFileName, ULONG SizeOfImage)
 {
 	struct SEF : IMAGE_DOS_HEADER, IMAGE_NT_HEADERS, IMAGE_SECTION_HEADER
 	{
 	} y {};
-
-	//++ optional
-	union {
-		FILETIME ft;
-		LARGE_INTEGER time;
-	};
-	GetSystemTimeAsFileTime(&ft);
-	RtlTimeToSecondsSince1970(&time, &y.FileHeader.TimeDateStamp);
-	//-- optional
 
 	SYSTEM_INFO si;
 	GetSystemInfo(&si);
@@ -24,12 +17,19 @@ NTSTATUS CreatePlaceHolder(PCWSTR lpFileName, ULONG SizeOfImage)
 	y.e_magic = IMAGE_DOS_SIGNATURE;
 	y.e_lfanew = sizeof(IMAGE_DOS_HEADER);
 	y.Signature = IMAGE_NT_SIGNATURE;
+
+#ifdef _WIN64
 	y.FileHeader.Machine = IMAGE_FILE_MACHINE_AMD64;
+	y.OptionalHeader.Magic = IMAGE_NT_OPTIONAL_HDR64_MAGIC;
+	y.OptionalHeader.ImageBase = 1 + (ULONG_PTR)MAXULONG;
+#else
+	y.FileHeader.Machine = IMAGE_FILE_MACHINE_I386;
+	y.OptionalHeader.Magic = IMAGE_NT_OPTIONAL_HDR32_MAGIC;
+	y.OptionalHeader.ImageBase = 0x40000000;
+#endif
 	y.FileHeader.SizeOfOptionalHeader = sizeof(IMAGE_OPTIONAL_HEADER);
 	y.FileHeader.NumberOfSections = 1;
 	y.FileHeader.Characteristics = IMAGE_FILE_DLL|IMAGE_FILE_EXECUTABLE_IMAGE|IMAGE_FILE_LARGE_ADDRESS_AWARE;
-	y.OptionalHeader.Magic = IMAGE_NT_OPTIONAL_HDR64_MAGIC;
-	y.OptionalHeader.ImageBase = 1 + (ULONG_PTR)MAXULONG;
 	y.OptionalHeader.SectionAlignment = si.dwPageSize;
 	y.OptionalHeader.FileAlignment = si.dwPageSize;
 	y.OptionalHeader.MajorOperatingSystemVersion = _WIN32_WINNT_VISTA >> 8;
@@ -47,17 +47,21 @@ NTSTATUS CreatePlaceHolder(PCWSTR lpFileName, ULONG SizeOfImage)
 	UNICODE_STRING ObjectName;
 	if (0 <= (status = RtlDosPathNameToNtPathName_U_WithStatus(lpFileName, &ObjectName, 0, 0)))
 	{
-		HANDLE hFile;
+		HANDLE hFile = 0;
 		IO_STATUS_BLOCK iosb;
 		OBJECT_ATTRIBUTES oa = { sizeof(oa), 0, &ObjectName, OBJ_CASE_INSENSITIVE };
 		
-		status = NtCreateFile(&hFile, FILE_APPEND_DATA|SYNCHRONIZE, &oa, &iosb, 0, 
-			FILE_ATTRIBUTE_TEMPORARY|FILE_ATTRIBUTE_HIDDEN|FILE_ATTRIBUTE_SYSTEM, 0,
-			FILE_OVERWRITE_IF, FILE_SYNCHRONOUS_IO_NONALERT|FILE_NON_DIRECTORY_FILE, 0, 0);
+		FILE_BASIC_INFORMATION fbi;
+		if (0 > ZwQueryAttributesFile(&oa, &fbi))
+		{
+			status = NtCreateFile(&hFile, FILE_APPEND_DATA|SYNCHRONIZE, &oa, &iosb, 0, 
+				FILE_ATTRIBUTE_TEMPORARY|FILE_ATTRIBUTE_HIDDEN|FILE_ATTRIBUTE_SYSTEM, 0,
+				FILE_OVERWRITE_IF, FILE_SYNCHRONOUS_IO_NONALERT|FILE_NON_DIRECTORY_FILE, 0, 0);
+		}
 		
 		RtlFreeUnicodeString(&ObjectName);
 
-		if (0 <= status)
+		if (0 <= status && hFile)
 		{
 			status = NtWriteFile(hFile, 0, 0, 0, &iosb, &y, sizeof(y), 0, 0);
 			NtClose(hFile);
@@ -103,7 +107,7 @@ struct IMAGE_Ctx : public TEB_ACTIVE_FRAME
 			} while (frame = frame->Previous);
 		}
 
-		return FALSE;
+		return 0;
 	}
 };
 
@@ -293,12 +297,9 @@ NTSTATUS LoadLibraryFromMem(_Out_ HMODULE* phmod, _In_ PVOID pvImage)
 		return STATUS_INVALID_IMAGE_FORMAT;
 	}
 
-	FILETIME nonce;
-	GetSystemTimeAsFileTime(&nonce);
-	
 	WCHAR buf[32];
-	if (0 < swprintf_s(buf, _countof(buf), L"%%tmp%%\\%08X%08X.tmp", 
-		RtlRandomEx(&nonce.dwHighDateTime), RtlRandomEx(&nonce.dwLowDateTime)))
+	if (0 < swprintf_s(buf, _countof(buf), L"%%tmp%%\\$$%X.%X.tmp", 
+		pinth->OptionalHeader.SizeOfImage, pinth->FileHeader.Machine))
 	{
 		ULONG cch = 0;
 		PWSTR lpFileName = 0;
@@ -322,3 +323,5 @@ NTSTATUS LoadLibraryFromMem(_Out_ HMODULE* phmod, _In_ PVOID pvImage)
 
 	return STATUS_INTERNAL_ERROR;
 }
+
+_NT_END

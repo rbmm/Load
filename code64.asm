@@ -1,13 +1,13 @@
 
-; long __cdecl retFromMapViewOfSection(long)
-extern ?retFromMapViewOfSection@@YAJJ@Z : PROC
-
 .code
 
-; long __cdecl aretFromMapViewOfSection(void)
-?aretFromMapViewOfSection@@YAJXZ proc
-  mov ecx,eax
-  call ?retFromMapViewOfSection@@YAJJ@Z
-?aretFromMapViewOfSection@@YAJXZ endp
+; long __cdecl NT::retFromMapViewOfSection(long)
+extern ?retFromMapViewOfSection@NT@@YAJJ@Z : PROC
 
-end
+; long __cdecl NT::aretFromMapViewOfSection(void)
+?aretFromMapViewOfSection@NT@@YAJXZ proc
+	mov ecx,eax
+	call ?retFromMapViewOfSection@NT@@YAJJ@Z
+?aretFromMapViewOfSection@NT@@YAJXZ endp
+
+END
