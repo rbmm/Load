@@ -8,7 +8,7 @@ extern ?retFromMapViewOfSection@NT@@YIJJ@Z : PROC
 ; long __stdcall NT::aretFromMapViewOfSection(void)
 ?aretFromMapViewOfSection@NT@@YGJXZ proc
 	mov ecx,eax
-	jmp ?retFromMapViewOfSection@NT@@YIJJ@Z
+	call ?retFromMapViewOfSection@NT@@YIJJ@Z
 ?aretFromMapViewOfSection@NT@@YGJXZ endp
 
 end
