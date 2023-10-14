@@ -2,152 +2,72 @@
 
 _NT_BEGIN
 
-BOOLEAN IsImageOk(_In_ ULONG SizeOfImage, _In_ HANDLE hSection)
+NTSTATUS CreatePlaceHolder(PCWSTR lpFileName, ULONG SizeOfImage)
 {
-	BOOLEAN fOk = FALSE;
-
-	SIZE_T ViewSize = 0;
-	union {
-		PVOID BaseAddress = 0;
-		PIMAGE_DOS_HEADER pidh;
-	};
-
-	if (0 <= ZwMapViewOfSection(hSection, NtCurrentProcess(), &BaseAddress, 0, 0, 0, 
-		&ViewSize, ViewUnmap, 0, PAGE_READONLY))
+	struct SEF : IMAGE_DOS_HEADER, IMAGE_NT_HEADERS, IMAGE_SECTION_HEADER
 	{
-		if (ViewSize >= SizeOfImage && pidh->e_magic == IMAGE_DOS_SIGNATURE)
-		{
-			ULONG VirtualAddress = pidh->e_lfanew;
+	} y {};
 
-			if (VirtualAddress < ViewSize - sizeof(IMAGE_NT_HEADERS))
-			{
-				union {
-					PVOID pv;
-					PIMAGE_NT_HEADERS pinth;
-					PIMAGE_LOAD_CONFIG_DIRECTORY picd;
-				};
+	SYSTEM_INFO si;
+	GetSystemInfo(&si);
+	SizeOfImage = (SizeOfImage + si.dwAllocationGranularity - 1) & ~(si.dwAllocationGranularity - 1);
 
-				pv = RtlOffsetToPointer(BaseAddress, VirtualAddress);
+	SIZE_T Alignment = si.dwPageSize - 1;
 
-				if (pinth->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR_MAGIC && 
-					pinth->OptionalHeader.SizeOfImage >= SizeOfImage)
-				{
-					IMAGE_DATA_DIRECTORY DataDirectory = pinth->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG];
+	y.e_magic = IMAGE_DOS_SIGNATURE;
+	y.e_lfanew = sizeof(IMAGE_DOS_HEADER);
+	y.Signature = IMAGE_NT_SIGNATURE;
 
-					if (DataDirectory.Size < __builtin_offsetof(IMAGE_LOAD_CONFIG_DIRECTORY, GuardFlags))
-					{
-						fOk = TRUE;
-					}
-					else
-					{
-						if (DataDirectory.VirtualAddress < ViewSize - sizeof(IMAGE_LOAD_CONFIG_DIRECTORY))
-						{
-							pv = RtlOffsetToPointer(BaseAddress, DataDirectory.VirtualAddress);
+#ifdef _WIN64
+	y.FileHeader.Machine = IMAGE_FILE_MACHINE_AMD64;
+	y.OptionalHeader.Magic = IMAGE_NT_OPTIONAL_HDR64_MAGIC;
+	y.OptionalHeader.ImageBase = 1 + (ULONG_PTR)MAXULONG;
+#else
+	y.FileHeader.Machine = IMAGE_FILE_MACHINE_I386;
+	y.OptionalHeader.Magic = IMAGE_NT_OPTIONAL_HDR32_MAGIC;
+	y.OptionalHeader.ImageBase = 0x40000000;
+#endif
+	y.FileHeader.SizeOfOptionalHeader = sizeof(IMAGE_OPTIONAL_HEADER);
+	y.FileHeader.NumberOfSections = 1;
+	y.FileHeader.Characteristics = IMAGE_FILE_DLL|IMAGE_FILE_EXECUTABLE_IMAGE|IMAGE_FILE_LARGE_ADDRESS_AWARE;
+	y.OptionalHeader.SectionAlignment = si.dwPageSize;
+	y.OptionalHeader.FileAlignment = si.dwPageSize;
+	y.OptionalHeader.MajorOperatingSystemVersion = _WIN32_WINNT_VISTA >> 8;
+	y.OptionalHeader.MajorSubsystemVersion = _WIN32_WINNT_VISTA >> 8;
+	y.OptionalHeader.SizeOfHeaders = (ULONG)((sizeof(y) + Alignment) & ~Alignment);
+	y.OptionalHeader.SizeOfImage = SizeOfImage;
+	y.OptionalHeader.Subsystem = IMAGE_SUBSYSTEM_WINDOWS_GUI;
+	y.OptionalHeader.DllCharacteristics = IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE|IMAGE_DLLCHARACTERISTICS_HIGH_ENTROPY_VA|IMAGE_DLLCHARACTERISTICS_NX_COMPAT;
+	y.OptionalHeader.NumberOfRvaAndSizes = IMAGE_NUMBEROF_DIRECTORY_ENTRIES;
+	y.VirtualAddress = si.dwPageSize;
+	y.Misc.VirtualSize = SizeOfImage - si.dwPageSize;
+	y.Characteristics = IMAGE_SCN_CNT_CODE|IMAGE_SCN_MEM_EXECUTE|IMAGE_SCN_MEM_READ|IMAGE_SCN_MEM_WRITE;
 
-							fOk = picd->Size < __builtin_offsetof(IMAGE_LOAD_CONFIG_DIRECTORY, GuardFlags) || 
-								!picd->GuardCFFunctionCount;
-						}
-					}
-				}
-			}
-		}
-
-		ZwUnmapViewOfSection(NtCurrentProcess(), BaseAddress);
-	}
-
-	return fOk;
-}
-
-NTSTATUS FindNoCfgDll(_In_ ULONG SizeOfImage, _Out_ PUNICODE_STRING FileName)
-{
-	HANDLE hFile;
-	IO_STATUS_BLOCK iosb;
+	NTSTATUS status;
 	UNICODE_STRING ObjectName;
-	OBJECT_ATTRIBUTES oa = { sizeof(oa), 0, &ObjectName, OBJ_CASE_INSENSITIVE };
-	RtlInitUnicodeString(&ObjectName, L"\\systemroot\\system32");
-
-	NTSTATUS status = NtOpenFile(&oa.RootDirectory, 
-		FILE_LIST_DIRECTORY|SYNCHRONIZE, &oa, &iosb, FILE_SHARE_VALID_FLAGS, 
-		FILE_DIRECTORY_FILE|FILE_SYNCHRONOUS_IO_NONALERT);
-
-	if (0 <= status)
+	if (0 <= (status = RtlDosPathNameToNtPathName_U_WithStatus(lpFileName, &ObjectName, 0, 0)))
 	{
-		status = STATUS_NO_MEMORY;
-
-		enum { buf_size = 0x10000 };
-
-		if (PVOID buf = LocalAlloc(0, buf_size))
+		HANDLE hFile = 0;
+		IO_STATUS_BLOCK iosb;
+		OBJECT_ATTRIBUTES oa = { sizeof(oa), 0, &ObjectName, OBJ_CASE_INSENSITIVE };
+		
+		FILE_BASIC_INFORMATION fbi;
+		if (0 > ZwQueryAttributesFile(&oa, &fbi))
 		{
-			static const UNICODE_STRING DLL = RTL_CONSTANT_STRING(L"*.dll");
-
-			while (0 <= (status = NtQueryDirectoryFile(oa.RootDirectory, 
-				0, 0, 0, &iosb, buf, buf_size, FileDirectoryInformation,
-				FALSE, const_cast<PUNICODE_STRING>(&DLL), FALSE)))
-			{
-				union {
-					PVOID pv;
-					PUCHAR pc;
-					PFILE_DIRECTORY_INFORMATION pfdi;
-				};
-
-				pv = buf;
-
-				ULONG NextEntryOffset = 0;
-
-				do 
-				{
-					pc += NextEntryOffset;
-
-					if (pfdi->EndOfFile.QuadPart >= SizeOfImage)
-					{
-						ObjectName.Buffer = pfdi->FileName;
-						ObjectName.MaximumLength = ObjectName.Length = (USHORT)pfdi->FileNameLength;
-
-						HMODULE hmod;
-						if (STATUS_DLL_NOT_FOUND != LdrGetDllHandle(0, 0, &ObjectName, &hmod))
-						{
-							// dll with such name already loaded
-							continue;
-						}
-
-						if (0 <= NtOpenFile(&hFile, FILE_READ_DATA|SYNCHRONIZE, &oa, &iosb, FILE_SHARE_READ, 
-							FILE_NON_DIRECTORY_FILE|FILE_SYNCHRONOUS_IO_NONALERT))
-						{
-							BOOLEAN fOk = FALSE;
-
-							HANDLE hSection;
-
-							if (0 <= NtCreateSection(&hSection, SECTION_MAP_READ, 0, 0, PAGE_READONLY, SEC_IMAGE_NO_EXECUTE, hFile))
-							{
-								fOk = IsImageOk(SizeOfImage, hSection);
-
-								NtClose(hSection);
-							}
-
-							NtClose(hFile);
-
-							if (0 <= status)
-							{
-								if (fOk)
-								{
-									//DbgPrint("%I64x %wZ\n", pfdi->EndOfFile.QuadPart, &ObjectName);
-									status = RtlAppendUnicodeStringToString(FileName, &ObjectName);
-
-									goto __exit;
-								}
-							}
-						}
-					}
-
-				} while (NextEntryOffset = pfdi->NextEntryOffset);
-			}
-__exit:
-
-			LocalFree(buf);
+			status = NtCreateFile(&hFile, FILE_APPEND_DATA|SYNCHRONIZE, &oa, &iosb, 0, 
+				FILE_ATTRIBUTE_TEMPORARY|FILE_ATTRIBUTE_HIDDEN|FILE_ATTRIBUTE_SYSTEM, 0,
+				FILE_OVERWRITE_IF, FILE_SYNCHRONOUS_IO_NONALERT|FILE_NON_DIRECTORY_FILE, 0, 0);
 		}
-		NtClose(oa.RootDirectory);
-	}
+		
+		RtlFreeUnicodeString(&ObjectName);
 
+		if (0 <= status && hFile)
+		{
+			status = NtWriteFile(hFile, 0, 0, 0, &iosb, &y, sizeof(y), 0, 0);
+			NtClose(hFile);
+		}
+	}
+	
 	return status;
 }
 
@@ -157,10 +77,10 @@ struct IMAGE_Ctx : public TEB_ACTIVE_FRAME
 
 	PIMAGE_NT_HEADERS _M_pinth;
 	PVOID _M_retAddr = 0, _M_pvImage, *_M_pBaseAddress = 0;
-	PCUNICODE_STRING _M_lpFileName;
+	PCWSTR _M_lpFileName;
 	NTSTATUS _M_status = STATUS_UNSUCCESSFUL;
 
-	IMAGE_Ctx(PVOID pvImage, PIMAGE_NT_HEADERS pinth, PCUNICODE_STRING lpFileName) 
+	IMAGE_Ctx(PVOID pvImage, PIMAGE_NT_HEADERS pinth, PCWSTR lpFileName) 
 		: _M_pvImage(pvImage), _M_pinth(pinth), _M_lpFileName(lpFileName)
 	{
 		const static TEB_ACTIVE_FRAME_CONTEXT FrameContext = { 0, FrameName };
@@ -253,7 +173,7 @@ NTSTATUS OverwriteSection(_In_ PVOID BaseAddress, _In_ PVOID pvImage, _In_ PIMAG
 }
 
 //#define _PRINT_CPP_NAMES_
-#include "../inc/asmfunc.h"
+#include "asmfunc.h"
 
 NTSTATUS __fastcall retFromMapViewOfSection(NTSTATUS status)
 {
@@ -300,9 +220,8 @@ LONG NTAPI MyVexHandler(::PEXCEPTION_POINTERS ExceptionInfo)
 	{
 		if (IMAGE_Ctx* ctx = IMAGE_Ctx::get())
 		{
-			UNICODE_STRING ObjectName;
-			RtlInitUnicodeString(&ObjectName, (PCWSTR)reinterpret_cast<PNT_TIB>(NtCurrentTeb())->ArbitraryUserPointer);
-			if (RtlEqualUnicodeString(&ObjectName, ctx->_M_lpFileName, FALSE))
+			PCWSTR lpFileName = (PCWSTR)reinterpret_cast<PNT_TIB>(NtCurrentTeb())->ArbitraryUserPointer;
+			if (lpFileName && !wcscmp(lpFileName, ctx->_M_lpFileName))
 			{
 				ctx->_M_pBaseAddress =
 #ifdef _WIN64
@@ -330,7 +249,7 @@ LONG NTAPI MyVexHandler(::PEXCEPTION_POINTERS ExceptionInfo)
 	return EXCEPTION_CONTINUE_SEARCH;
 }
 
-NTSTATUS LoadLibraryFromMem(_Out_ HMODULE* phmod, _In_ PVOID pvImage, _In_ PIMAGE_NT_HEADERS pinth, _In_ PCUNICODE_STRING lpFileName)
+NTSTATUS LoadLibraryFromMem(_Out_ HMODULE* phmod, _In_ PVOID pvImage, _In_ PIMAGE_NT_HEADERS pinth, _In_ PCWSTR lpFileName)
 {
 	if (PVOID VectoredHandlerHandle = RtlAddVectoredExceptionHandler(TRUE, MyVexHandler))
 	{
@@ -344,7 +263,10 @@ NTSTATUS LoadLibraryFromMem(_Out_ HMODULE* phmod, _In_ PVOID pvImage, _In_ PIMAG
 		{
 			IMAGE_Ctx ictx(pvImage, pinth, lpFileName);
 
-			status = LdrLoadDll(0, 0, lpFileName, phmod);
+			UNICODE_STRING us;
+			RtlInitUnicodeString(&us, lpFileName);
+
+			status = LdrLoadDll(0, 0, &us, phmod);
 
 			ctx.Dr3 = 0;
 			ctx.Dr7 = 0x400;
@@ -375,16 +297,31 @@ NTSTATUS LoadLibraryFromMem(_Out_ HMODULE* phmod, _In_ PVOID pvImage)
 		return STATUS_INVALID_IMAGE_FORMAT;
 	}
 
-	WCHAR FileName[0x180];
-	UNICODE_STRING ObjectName = { 0, sizeof(FileName), FileName };
-	
-	NTSTATUS status = RtlAppendUnicodeToString(&ObjectName, L"\\\\?\\Global\\GLOBALROOT\\SystemRoot\\system32\\");
-	if (0 <= status && 0 <= (status = FindNoCfgDll(pinth->OptionalHeader.SizeOfImage, &ObjectName)))
+	WCHAR buf[32];
+	if (0 < swprintf_s(buf, _countof(buf), L"%%tmp%%\\$$%X.%X.tmp", 
+		pinth->OptionalHeader.SizeOfImage, pinth->FileHeader.Machine))
 	{
-		status = LoadLibraryFromMem(phmod, pvImage, pinth, &ObjectName);
+		ULONG cch = 0;
+		PWSTR lpFileName = 0;
+		while (cch = ExpandEnvironmentStringsW(buf, lpFileName, cch))
+		{
+			if (lpFileName)
+			{
+				NTSTATUS status = CreatePlaceHolder(lpFileName, pinth->OptionalHeader.SizeOfImage);
+				if (0 <= status)
+				{
+					status = LoadLibraryFromMem(phmod, pvImage, pinth, lpFileName);
+				}
+				return status;
+			}
+
+			lpFileName = (PWSTR)alloca(cch * sizeof(WCHAR));
+		}
+
+		return HRESULT_FROM_WIN32(GetLastError());
 	}
 
-	return status;
+	return STATUS_INTERNAL_ERROR;
 }
 
 _NT_END
